@@ -1,0 +1,8 @@
+map.out
+*.o
+*.bin
+*.elf
+.git/*
+docs/output/*
+docs/*.dox
+docs/lib/
