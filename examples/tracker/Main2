@@ -1,0 +1,87 @@
+#include <stdlib.h>
+#include <string.h>
+#include "myriota_user_api.h"
+
+#ifndef LOCATIONS_PER_MESSAGE
+#define LOCATIONS_PER_MESSAGE 4
+#endif
+
+#ifndef TRACKER_INTERVAL_HRS
+#define TRACKER_INTERVAL_HRS 2
+#endif
+
+// 1. โครงสร้างพิกัด (คงเดิม = 12 bytes)
+typedef struct {
+    int32_t latitude;  
+    int32_t longitude; 
+    uint32_t time;     
+} __attribute__((packed)) location_t;
+
+// 2. ปรับปรุงโครงสร้างข้อความใหม่ (เพิ่มตัวแปรเซนเซอร์เข้าไปใน Header)
+typedef struct {
+    uint16_t sequence_number; // 2 bytes
+    uint8_t location_count;   // 1 byte
+    
+    // เพิ่มเซนเซอร์ตรงนี้ (รวมเพิ่มมา 3 bytes)
+    int16_t temperature;      // 2 bytes: อุณหภูมิ (คูณ 100 เพื่อเลี่ยงทศนิยม เช่น 25.50C -> 2550)
+    uint8_t battery_level;    // 1 byte: ระดับแบตเตอรี่ (%) หรือแรงดันไฟฟ้า (คูณ 10 เช่น 4.2V -> 42)
+    
+    location_t locations[LOCATIONS_PER_MESSAGE]; // 48 bytes
+} __attribute__((packed)) tracker_message;
+
+static tracker_message msg = {0, 0, 0, 0, {{0}}};
+
+// ฟังก์ชันจำลองการอ่านค่าเซนเซอร์ (คุณต้องเปลี่ยนไปใช้ API หรือขา ADC จริงของบอร์ดคุณ)
+static int16_t ReadTemperature(void) {
+    // ตัวอย่าง: ถ้าบอร์ด Myriota จ่ายไฟหรือมีเซนเซอร์ภายใน หรืออ่านจาก I2C/ADC
+    // ในระบบจริงให้ใช้ฟังก์ชันอ่านค่าของบอร์ด เช่น 25.50 องศา จะส่งออกไปเป็น 2550
+    return 2550; 
+}
+
+static uint8_t ReadBattery(void) {
+    // ตัวอย่าง: อ่านเปอร์เซ็นต์แบตเตอรี่ที่เหลืออยู่ 0 - 100%
+    return 85; 
+}
+
+static void SendMessage(const tracker_message *msg) {
+    if (ScheduleMessage((void *)msg, sizeof(tracker_message)) == -1) {
+        printf("Failed to send message\n");
+        return;
+    }
+    printf("Scheduled message #%u | Temp: %.2f C | Bat: %u%%\n", 
+           msg->sequence_number, (float)msg->temperature / 100.0, msg->battery_level);
+}
+
+static time_t TrackerJob(void) {
+    if (GNSSFix()) printf("Failed to get GNSS Fix, using last known fix\n");
+
+    if (!HasValidGNSSFix()) return HoursFromNow(TRACKER_INTERVAL_HRS);
+
+    int32_t lat;
+    int32_t lon;
+    time_t timestamp;
+    LocationGet(&lat, &lon, &timestamp);
+
+    location_t *location = &msg.locations[msg.location_count];
+    location->latitude = lat;
+    location->longitude = lon;
+    location->time = (uint32_t)timestamp;
+    msg.location_count++;
+
+    if (msg.location_count < LOCATIONS_PER_MESSAGE) return HoursFromNow(TRACKER_INTERVAL_HRS);
+
+    // --- ก่อนส่งข้อความ: ทำการอัปเดตค่าเซนเซอร์ล่าสุดเข้าแพ็กเกจ ---
+    msg.temperature = ReadTemperature();
+    msg.battery_level = ReadBattery();
+
+    SendMessage(&msg);
+    
+    msg.sequence_number++;
+    msg.location_count = 0;
+    
+    return HoursFromNow(TRACKER_INTERVAL_HRS);
+}
+
+void AppInit() {
+    ScheduleJob(TrackerJob, ASAP());
+}
